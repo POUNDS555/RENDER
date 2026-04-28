@@ -1,0 +1,8 @@
+python-telegram-bot
+openai
+pytz
+requests
+Flask
+gunicorn
+schedule
+telethon
