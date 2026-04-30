@@ -50,7 +50,12 @@ def home():
     return "Ultra-Premium Money Printer is alive!", 200
 
 # -------------------- TELEGRAM CLIENT --------------------
-client = TelegramClient("ultra_session", API_ID, API_HASH)
+from telethon.sessions import StringSession
+session_string = os.environ.get("STRING_SESSION")
+if session_string:
+    client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+else:
+    client = TelegramClient("ultra_session", API_ID, API_HASH)
 
 # -------------------- EARNINGS DATA --------------------
 EARNINGS_FILE = "ultra_earnings.json"
