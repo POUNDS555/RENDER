@@ -2,6 +2,7 @@ import os, json, re, time, random, asyncio, threading, logging
 from datetime import datetime, date, timedelta
 from flask import Flask
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 import openai
 import schedule
 
@@ -50,7 +51,6 @@ def home():
     return "Ultra-Premium Money Printer is alive!", 200
 
 # -------------------- TELEGRAM CLIENT --------------------
-from telethon.sessions import StringSession
 session_string = os.environ.get("STRING_SESSION")
 if session_string:
     client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
@@ -153,7 +153,6 @@ def vary_answer(ans):
     return ans
 
 # -------------------- WIN DETECTION --------------------
-# Patterns that indicate a win (case‑insensitive)
 WIN_PATTERNS = [
     r"you won ([\d\.]+)\s*([A-Za-z]{2,10})",
     r"congratulations.*?won ([\d\.]+)\s*([A-Za-z]{2,10})",
@@ -169,7 +168,6 @@ async def detect_and_log_win(message):
     text = message.text
     if not text:
         return
-    # Check if message mentions the bot's own username (or first name)
     if OWN_USERNAME and OWN_USERNAME.lower() not in text.lower():
         return
     for pattern in WIN_PATTERNS:
@@ -177,22 +175,19 @@ async def detect_and_log_win(message):
         if m:
             amount = float(m.group(1))
             token = m.group(2).upper()
-            # Validate token is one of our tracked tokens
             known_tokens = {g["token"].upper() for g in TRIVIA_GROUPS}
             if token in known_tokens:
                 group_name = ""
-                # find group name from chat
                 for g in TRIVIA_GROUPS:
                     if g["group_id"] == str(message.chat_id) or g["group_id"] == message.chat.username:
                         group_name = g["name"]
                         break
                 log_win(amount, token, source=group_name)
-                # Send DM to Saved Messages
                 try:
                     await client.send_message("me", f"🏆 Auto‑win: +{amount} {token} in {group_name}")
                 except:
                     pass
-                return  # log once per message
+                return
 
 # -------------------- TELEGRAM HANDLERS --------------------
 @client.on(events.NewMessage(incoming=True))
@@ -200,7 +195,7 @@ async def handle_all(event):
     """Route messages: if it's a question in a target group → answer.
        If it's a win announcement → log it."""
     if event.is_private:
-        return  # we only care about group messages
+        return
     try:
         chat = await event.get_chat()
     except:
@@ -209,16 +204,12 @@ async def handle_all(event):
         return
 
     text = event.message.text or ""
-    # WIN DETECTION (check first, before answering, because answer might trigger ban if we answer our own win)
     await detect_and_log_win(event.message)
 
-    # QUESTION ANSWERING
     if "?" in text and len(text) < 300:
         logger.info(f"Question in {chat.username or chat.id}: {text[:80]}")
-        # random human delay
         delay = human_delay()
         await asyncio.sleep(delay)
-        # maybe sabotage
         wrong = maybe_sabotage()
         if wrong:
             answer = wrong
@@ -234,27 +225,27 @@ async def handle_all(event):
         except Exception as e:
             logger.error(f"Reply error: {e}")
 
-# -------------------- COMMANDS (private chat or Saved Messages) --------------------
-@client.on(events.NewMessage(pattern=r"^/status$"))
+# -------------------- COMMANDS (outgoing=True so they work from your own Saved Messages) --------------------
+@client.on(events.NewMessage(pattern=r"^/status$", outgoing=True))
 async def cmd_status(event):
     await event.reply(f"✅ Ultra‑Premium Bot online.\n{daily_summary()}")
 
-@client.on(events.NewMessage(pattern=r"^/earnings$"))
+@client.on(events.NewMessage(pattern=r"^/earnings$", outgoing=True))
 async def cmd_earnings(event):
     await event.reply(daily_summary())
 
-@client.on(events.NewMessage(pattern=r"^/balance$"))
+@client.on(events.NewMessage(pattern=r"^/balance$", outgoing=True))
 async def cmd_balance(event):
     await event.reply(threshold_report())
 
-@client.on(events.NewMessage(pattern=r"^/wallet$"))
+@client.on(events.NewMessage(pattern=r"^/wallet$", outgoing=True))
 async def cmd_wallet(event):
     msg = "🔑 Linked wallets:\n"
     for g in TRIVIA_GROUPS:
         msg += f"{g['token']}: {g['wallet'][:15]}... (min {g['min_withdraw']})\n"
     await event.reply(msg)
 
-@client.on(events.NewMessage(pattern=r"^/log ([\d\.]+) (\w+)$"))
+@client.on(events.NewMessage(pattern=r"^/log ([\d\.]+) (\w+)$", outgoing=True))
 async def cmd_log(event):
     amount = float(event.pattern_match.group(1))
     token = event.pattern_match.group(2)
@@ -263,7 +254,6 @@ async def cmd_log(event):
 
 # -------------------- DAILY REPORT --------------------
 async def send_daily_report():
-    """Send a DM every day at 9:00 UTC with earnings and threshold status."""
     msg = f"☀️ Daily Report\n{daily_summary()}\n\n{threshold_report()}"
     try:
         await client.send_message("me", msg)
@@ -271,7 +261,6 @@ async def send_daily_report():
         pass
 
 def run_scheduler():
-    """Blocking loop to run scheduled tasks."""
     while True:
         schedule.run_pending()
         time.sleep(60)
@@ -284,15 +273,12 @@ async def main():
     OWN_USERNAME = me.username
     logger.info(f"Bot logged in as @{OWN_USERNAME}")
 
-    # Schedule daily report at 09:00 UTC
     schedule.every().day.at("09:00").do(lambda: asyncio.create_task(send_daily_report()))
-    # Start scheduler in a separate thread
     threading.Thread(target=run_scheduler, daemon=True).start()
 
     logger.info("Ultra‑Premium Money Printer is running...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Launch Flask in a daemon thread, then start the bot
     threading.Thread(target=app.run, kwargs={"host":"0.0.0.0", "port":int(os.environ.get("PORT",10000))}, daemon=True).start()
     asyncio.run(main())
