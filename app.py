@@ -3,6 +3,7 @@ from datetime import datetime, date, timedelta
 from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
 import openai
 import schedule
 
@@ -16,24 +17,38 @@ openai.api_key = OPENAI_KEY
 # -------------------- TRIVIA GROUPS --------------------
 DEFAULT_GROUPS = """[
   {
-    "name": "BNB Trivia Bot",
-    "group_id": "@BNBTriviaBot",
-    "token": "BNB",
+    "name": "QuizDrop (TON)",
+    "group_id": "@QuizDropBot",
+    "token": "TON",
     "min_withdraw": 0.01,
+    "wallet": "UQDzpBc7ifezHnx8f1LD87JGhoYkFLsVxQtmjvbv4jQy9P5g"
+  },
+  {
+    "name": "CryptoTrivia (BNB)",
+    "group_id": "@CryptoTriviaBot",
+    "token": "BNB",
+    "min_withdraw": 0.001,
     "wallet": "0x11B67115cb9142DFBBaF59f96E009a6F5851C48C"
   },
   {
-    "name": "TRX Quiz",
-    "group_id": "@TRXQuizBot",
+    "name": "TriviaGuru (TRX)",
+    "group_id": "@TriviaGuruBot",
     "token": "TRX",
-    "min_withdraw": 10,
+    "min_withdraw": 5,
     "wallet": "TEm2JNmcNSq4oqWbvLHn98B5ei4q6PXc7U"
   },
   {
-    "name": "TON Game",
-    "group_id": "@TONGameBot",
+    "name": "QuizCrypto (MATIC)",
+    "group_id": "@QuizCryptoBot",
+    "token": "MATIC",
+    "min_withdraw": 1,
+    "wallet": "0x11B67115cb9142DFBBaF59f96E009a6F5851C48C"
+  },
+  {
+    "name": "TonPuzzle (TON)",
+    "group_id": "@TonPuzzleBot",
     "token": "TON",
-    "min_withdraw": 0.5,
+    "min_withdraw": 0.01,
     "wallet": "UQDzpBc7ifezHnx8f1LD87JGhoYkFLsVxQtmjvbv4jQy9P5g"
   }
 ]"""
@@ -161,7 +176,7 @@ WIN_PATTERNS = [
     r"\+([\d\.]+)\s*([A-Za-z]{2,10})\s*(?:token|coin)",
 ]
 
-OWN_USERNAME = None   # set after login
+OWN_USERNAME = None
 
 async def detect_and_log_win(message):
     global OWN_USERNAME
@@ -189,16 +204,25 @@ async def detect_and_log_win(message):
                     pass
                 return
 
+# -------------------- GROUP ACTIVITY TRACKER --------------------
+last_active = {}  # chat_id -> timestamp
+
 # -------------------- TELEGRAM HANDLERS --------------------
 @client.on(events.NewMessage(incoming=True))
 async def handle_all(event):
-    """Route messages: if it's a question in a target group → answer.
-       If it's a win announcement → log it."""
-    if event.is_private:
-        return
+    # Record activity for health checks
+    chat = None
     try:
         chat = await event.get_chat()
+        chat_id = str(chat.id) if hasattr(chat, 'id') else None
+        if chat_id:
+            last_active[chat_id] = time.time()
     except:
+        pass
+
+    if event.is_private:
+        return
+    if chat is None:
         return
     if chat.username not in target_chats and str(chat.id) not in target_chats:
         return
@@ -252,6 +276,51 @@ async def cmd_log(event):
     log_win(amount, token, "manual")
     await event.reply(f"✅ Manual log: +{amount} {token}")
 
+# -------------------- HEALTH CHECKER --------------------
+HEALTH_SILENCE_HOURS = 6   # alert if no message for 6 hours
+
+async def health_check():
+    """Hourly check: group access, activity, flood waits."""
+    alerts = []
+    now = time.time()
+    for group in TRIVIA_GROUPS:
+        gid = group["group_id"]
+        name = group["name"]
+        try:
+            # Try to fetch entity (verifies access)
+            entity = await client.get_entity(gid)
+            # Check last activity
+            chat_id = str(entity.id)
+            last = last_active.get(chat_id, 0)
+            if last and (now - last) > HEALTH_SILENCE_HOURS * 3600:
+                hrs = int((now - last) / 3600)
+                alert = f"⏰ Silent group: {name} ({gid}) – no messages for {hrs}h"
+                alerts.append(alert)
+                logger.warning(alert)
+        except FloodWaitError as e:
+            alert = f"🚦 Flood wait on {name}: {e.seconds}s"
+            alerts.append(alert)
+            logger.warning(alert)
+        except Exception as e:
+            alert = f"❌ Cannot access {name} ({gid}): {e}"
+            alerts.append(alert)
+            logger.warning(alert)
+
+    if alerts:
+        try:
+            msg = "📋 Bot Health Report:\n" + "\n".join(alerts)
+            await client.send_message("me", msg)
+        except:
+            pass
+    else:
+        logger.info("Health check: all groups OK")
+
+# -------------------- /health COMMAND --------------------
+@client.on(events.NewMessage(pattern=r"^/health$", outgoing=True))
+async def cmd_health(event):
+    await health_check()
+    await event.reply("✅ Health check complete. Check your Saved Messages for any alerts.")
+
 # -------------------- DAILY REPORT --------------------
 async def send_daily_report():
     msg = f"☀️ Daily Report\n{daily_summary()}\n\n{threshold_report()}"
@@ -273,10 +342,13 @@ async def main():
     OWN_USERNAME = me.username
     logger.info(f"Bot logged in as @{OWN_USERNAME}")
 
+    # Schedule health check every hour
+    schedule.every().hour.do(lambda: asyncio.create_task(health_check()))
+    # Schedule daily report at 09:00 UTC
     schedule.every().day.at("09:00").do(lambda: asyncio.create_task(send_daily_report()))
     threading.Thread(target=run_scheduler, daemon=True).start()
 
-    logger.info("Ultra‑Premium Money Printer is running...")
+    logger.info("Ultra‑Premium Money Printer with Health Monitor is running...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
